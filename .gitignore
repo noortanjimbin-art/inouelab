@@ -1,0 +1,15 @@
+# Vercel
+.vercel
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Local data — don't commit client annotation files
+*.xlsx
+*.xlsm
+*.json
+!vercel.json
