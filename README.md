@@ -1,8 +1,7 @@
 # StateMeter · Excel → JSON Converter
 
 A browser-based tool that merges every **Annotation for …** tab in a StateMeter
-annotation workbook (`.xlsx`), validates each clip against the client output
-schema (v1.5), and exports **one JSON file per clip**.
+annotation workbook (`.xlsx`), reads the **Cliplist** as the master roster (so un-annotated clips still appear), validates each clip against the client output schema (v1.5), and exports **one JSON file per clip**.
 
 Everything runs **client-side** — the workbook is parsed in the browser and the
 annotation data is never uploaded anywhere. The file is self-contained (the
@@ -72,3 +71,19 @@ Excel and ZIP libraries are inlined), so it also works offline.
 3. Every push redeploys automatically.
 
 To keep the page internal-only, enable **Settings → Deployment Protection**.
+
+## Notes on clip handling
+
+- **Full roster.** The clip list comes from the **Cliplist** tab, so every planned
+  clip appears even if no one has annotated it yet. Un-annotated clips show as
+  **not annotated** and carry metadata (category, video_uid, annotator, range)
+  from Cliplist.
+- **Clip IDs are plain numbers** — `clip_1`, `clip_40`, `clip_22.1` (no zero-padding).
+- **Categories** are lowercased with underscores — `glass_container`, `cup_fill`.
+- **Annotator** is shown on every clip row so issues can be traced to a person.
+- **Performance.** Large workbooks (StateMeter files can exceed 150 MB because of
+  embedded screenshots) are handled by stripping `xl/media/*` images in-browser
+  before parsing — only the sheet data is read, so parsing takes ~2s instead of
+  stalling or crashing.
+- **Incomplete export.** Incomplete or not-annotated clips can still be exported,
+  but a confirmation warns that their JSON will contain nulls or empty keyframes.
