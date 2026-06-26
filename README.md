@@ -1,69 +1,74 @@
 # StateMeter · Excel → JSON Converter
 
 A browser-based tool that merges every **Annotation for …** tab in a StateMeter
-annotation workbook (`.xlsx`), validates each clip and keyframe, de-duplicates
-repeated keyframes, and exports the StateMeter clip JSON schema.
+annotation workbook (`.xlsx`), validates each clip against the client output
+schema (v1.5), and exports **one JSON file per clip**.
 
 Everything runs **client-side** — the workbook is parsed in the browser and the
-annotation data is never uploaded anywhere.
+annotation data is never uploaded anywhere. The file is self-contained (the
+Excel and ZIP libraries are inlined), so it also works offline.
 
 ## Use it
 
-Open `index.html` in any modern browser (or visit the deployed URL):
-
 1. Drop the StateMeter `.xlsx` onto the page (or click to choose a file).
-2. Review the validation report and the per-clip keyframe timeline.
-3. Toggle **Strict** / **Lenient**:
-   - **Strict** (default): excludes keyframes/clips with missing required data and
-     lists exactly what to fix.
-   - **Lenient**: writes everything; missing values become `null`.
-4. Click **Download JSON**.
+2. The summary ribbon shows tabs merged, clip count, complete vs incomplete, and
+   total keyframes.
+3. Browse the clip list. Each clip shows its keyframe count and a
+   **complete / N issues** badge. Click **details** to see the keyframe timeline
+   and the full issue list for that clip.
+4. Select clips to export:
+   - Complete clips are pre-selected on load.
+   - Use **All / Complete / Incomplete** filters and the search box.
+   - **Select complete** picks only the clean clips; **Select all shown** /
+     **Clear** adjust the rest. Incomplete clips can still be selected manually.
+5. **Download selected (.zip)** — one `clip_id.json` per clip inside the zip
+   (a single selected clip downloads as a plain `.json`).
 
-The file is fully self-contained — the Excel-parsing library is inlined, so it
-works offline with no external dependencies.
+## Output schema (per clip, client spec v1.5)
 
-## What it validates and cleans
+```json
+{
+  "clip_id": "clip_010",
+  "ego4d_version": "V2",
+  "video_uid": "…",
+  "annotator_id": "Annotator 1",
+  "category": "Door",
+  "frame_range": [4800, 5460],
+  "anchor_min_frame": 4806,
+  "anchor_max_frame": 5025,
+  "keyframes": [
+    {"frame_idx": 4806, "form": "point", "s_low": 0.0, "s_high": 0.0,
+     "visibility": "visible", "bbox": {"x": 224, "y": 106, "w": 1216, "h": 948}}
+  ]
+}
+```
 
-- Merges all `Annotation for <name>` tabs (handles a stray leading space in a tab name).
-- Normalizes `Form` and `Visibility` (e.g. `partially occluded` → `partially_occluded`).
-- Falls back to the `S` column when `S_Low` / `S_High` are blank.
-- **De-duplicates** keyframes that match on frame_idx + form + s_low + s_high + visibility.
-- Flags: missing fields, placeholder clips (all keyframes the same frame),
-  reversed anchors (`anchor_min > anchor_max`), and keyframes outside the clip's frame range.
+## What it does to the data
+
+- **Only `Annotation for …` tabs** are read; all other tabs are ignored.
+- **Identical schema for every file** — only the fields above are emitted. Extra
+  sheet columns (Measure_Type, S_Raw, S, M_0/1/cur, AT_Status, QA_Status,
+  QA_Comment, Screenshot, raw Bbox_* columns) are not included.
+- **Variant headers** are matched to the same field (e.g. a descriptive header
+  like `(Always Default to "0")\nM_0` maps to `M_0`).
+- **Clip_ID normalization** — bare numbers become `clip_<n>` (e.g. `18` → `clip_18`),
+  a trailing `.0` is dropped (`clip_18.0` → `clip_18`), while decimals like
+  `clip_22.1` and zero-padding like `clip_002` are preserved. Each rename is reported.
+- **De-duplicates** keyframes identical on frame_idx + form + s_low + s_high +
+  visibility + bbox.
+- **Completeness** counts only the JSON fields. A clip is *complete* only if no
+  required field is null and it has at least one keyframe.
+- **Validation flags** (per client §10.4): null s-values, missing fields,
+  anchors not in point form (`anchor_min ≠ anchor_max`), form vs s-value
+  mismatch (`point` needs s_low = s_high; `interval`/`bound` need s_low < s_high),
+  keyframes outside frame_range, placeholder clips (all keyframes the same frame),
+  missing bbox, and a clip appearing in more than one tab.
 
 ## Deploy to Vercel (via GitHub)
 
-1. Push this folder to a GitHub repository.
-2. In Vercel: **Add New → Project → import the repo → Deploy.**
-   No build step or framework preset is needed — it's a static site, so leave the
-   build settings empty / "Other".
-3. Every push to the repo redeploys automatically.
+1. Push this folder to a GitHub repository (`index.html` must keep that name).
+2. In Vercel: **Add New → Project → import the repo → Deploy.** No build step —
+   set the framework preset to **Other**; it's a static site.
+3. Every push redeploys automatically.
 
-To keep the page private (internal use only), enable
-**Settings → Deployment Protection** in the Vercel project.
-
-## Output schema
-
-```json
-[
-  {
-    "clip_id": "clip_010",
-    "ego4d_version": "V2",
-    "video_uid": "…",
-    "annotator_id": "Annotator 1",
-    "category": "Door",
-    "frame_range": [4800, 5460],
-    "anchor_min_frame": 4806,
-    "anchor_max_frame": 5025,
-    "keyframes": [
-      {"frame_idx": 4806, "form": "point", "s_low": 0.0, "s_high": 0.0, "visibility": "visible"}
-    ]
-  }
-]
-```
-
-## Command-line alternative
-
-`xlsx_to_json.py` (in the parent folder) performs the identical conversion from a
-terminal: `python xlsx_to_json.py input.xlsx output.json` (requires
-`pip install pandas openpyxl`). Use it for batch or automated conversion.
+To keep the page internal-only, enable **Settings → Deployment Protection**.
