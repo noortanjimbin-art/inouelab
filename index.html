@@ -51,7 +51,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     --ink:#1f2a2c; --ink-dim:#5d6b6d; --ink-faint:#93999a;
     --teal:#0f8c82; --teal-bright:#0d7a72; --coral:#e05540; --coral-soft:#b54635;
     --amber:#c6871a; --amber-soft:#8a6210;
-    --ok:#0f8c82; --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --ok:#19b3a6; --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
     --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
   }
   *{box-sizing:border-box;margin:0;padding:0}
@@ -73,7 +73,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   .drop{border:1.5px dashed var(--line);border-radius:14px;background:linear-gradient(180deg,var(--panel),var(--panel-2));
     padding:40px 26px;text-align:center;cursor:pointer;transition:border-color .18s,background .18s,transform .12s}
   .drop:hover{border-color:var(--teal)}
-  .drop.drag{border-color:var(--teal-bright);background:linear-gradient(180deg,#14252f,#102029);transform:translateY(-1px)}
+  .drop.drag{border-color:var(--teal-bright);background:linear-gradient(180deg,#eef7f5,#e7f3f0);transform:translateY(-1px)}
+  .drop.loading{border-color:var(--teal);cursor:progress;opacity:.85}
+  .drop.loading .ico{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .drop .ico{font-family:var(--mono);font-size:28px;color:var(--teal)}
   .drop h2{font-size:16.5px;font-weight:600;margin:10px 0 4px}
   .drop p{color:var(--ink-dim);font-size:13px}
@@ -128,6 +131,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   .badge{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:14px;white-space:nowrap;letter-spacing:.02em}
   .badge.ok{background:rgba(25,179,166,.12);color:var(--teal-bright)}
   .badge.bad{background:rgba(255,111,94,.12);color:var(--coral-soft)}
+  .badge.none{background:rgba(147,153,154,.14);color:var(--ink-faint)}
   .kf-n{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint)}
   .expand{font-family:var(--mono);font-size:11px;color:var(--ink-faint);background:transparent;border:none;cursor:pointer;padding:4px 6px;transition:color .14s}
   .expand:hover{color:var(--ink)}
@@ -234,6 +238,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
 <script>
 const TAB_PREFIX="annotation for";
+const ROSTER_TAB="cliplist"; // master clip roster
 function normHeader(c){let s=String(c).trim();if(s.includes("\n"))s=s.split("\n").pop().trim();return s.replace(/\s+/g," ");}
 const COL={annotator_id:"Annotator_ID",clip_id:"Clip_ID",ego4d_version:"Ego4D_Version",video_uid:"Video_UID",category:"Category",
   frame_min:"Frame Range_MIN",frame_max:"Frame Range_MAX",anchor_min:"AnchorMin_Frame",anchor_max:"AnchorMax_Frame",
@@ -244,17 +249,50 @@ const toFloat=v=>{if(isBlank(v))return null;const n=Number(v);return Number.isFi
 const cleanStr=v=>isBlank(v)?null:String(v).trim();
 const normVis=v=>{const s=cleanStr(v);return s===null?null:s.toLowerCase().replace(/\s+/g,"_");};
 const normForm=v=>{const s=cleanStr(v);return s===null?null:s.toLowerCase();};
+const normCat=v=>{const s=cleanStr(v);return s===null?null:s.toLowerCase().replace(/\s+/g,"_");};
+// plain-number clip id: clip_001 -> clip_1, 40 -> clip_40, 22.1 -> clip_22.1
 function normClipId(raw){let s=String(raw).trim();if(s==="")return null;
-  if(/^\d+(\.0+)?$/.test(s))return "clip_"+parseInt(s,10);
+  if(/^\d+(\.\d+)?$/.test(s)){const f=parseFloat(s);return Number.isInteger(f)?"clip_"+parseInt(s,10):"clip_"+s.replace(/^0+/,"");}
   const m=s.match(/^(clip_)(\d+)(\.\d+)?$/i);
-  if(m){const dec=m[3];if(!dec||/^\.0+$/.test(dec))return "clip_"+m[2];return "clip_"+m[2]+dec;}
+  if(m){const num=parseInt(m[2],10);const dec=m[3];if(!dec||/^\.0+$/.test(dec))return "clip_"+num;return "clip_"+num+dec;}
   return s;}
+// is this a real clip id (not a junk/section/header row)?
+function isClipRow(raw){const s=String(raw).trim();return /^(clip_)?\d+(\.\d+)?$/i.test(s);}
 
 function convert(wb){
-  const tabs=wb.SheetNames.filter(s=>s.trim().toLowerCase().startsWith(TAB_PREFIX));
-  if(!tabs.length)throw new Error("No tabs starting with “Annotation for” were found in this workbook.");
-  const clips=new Map(),clipSource=new Map(),report=[],renamed=new Set();
-  for(const tab of tabs){
+  const sheetByLower={};wb.SheetNames.forEach(n=>sheetByLower[n.trim().toLowerCase()]=n);
+  const annTabs=wb.SheetNames.filter(s=>s.trim().toLowerCase().startsWith(TAB_PREFIX));
+  if(!annTabs.length)throw new Error("No tabs starting with “Annotation for” were found in this workbook.");
+  const clips=new Map(),clipSource=new Map(),renamed=new Set();
+  const ensure=cid=>{if(!clips.has(cid)){clips.set(cid,{clip_id:cid,ego4d_version:null,video_uid:null,annotator_id:null,
+    category:null,frame_range:[null,null],anchor_min_frame:null,anchor_max_frame:null,keyframes:[],
+    _tabs:new Set(),_issues:[],_annotated:false,_planned:false});}return clips.get(cid);};
+
+  // 1) Master roster from Cliplist (so un-annotated clips still appear)
+  if(sheetByLower[ROSTER_TAB]){
+    const raw=XLSX.utils.sheet_to_json(wb.Sheets[sheetByLower[ROSTER_TAB]],{defval:null,header:1});
+    if(raw.length){
+      const H=(raw[0]||[]).map(normHeader);
+      const ci=H.indexOf("clip_id"),vi=H.indexOf("video_uid"),ei=H.indexOf("ego4d_version"),
+        cat=H.indexOf("category"),an=H.findIndex(h=>/annotator_name/i.test(h)),aid=H.findIndex(h=>/annotator id/i.test(h)),
+        rmin=H.findIndex(h=>/range_min/i.test(h)),rmax=H.findIndex(h=>/range_max/i.test(h));
+      for(let i=1;i<raw.length;i++){const r=raw[i]||[];const rawId=ci>=0?r[ci]:null;
+        if(isBlank(rawId)||!isClipRow(rawId))continue;
+        const cid=normClipId(rawId);if(!cid)continue;
+        const c=ensure(cid);c._planned=true;
+        if(c.video_uid===null&&vi>=0)c.video_uid=cleanStr(r[vi]);
+        if(c.ego4d_version===null&&ei>=0)c.ego4d_version=cleanStr(r[ei]);
+        if(c.category===null&&cat>=0)c.category=normCat(r[cat]);
+        if(c.annotator_id===null){const nm=an>=0?cleanStr(r[an]):null;const id=aid>=0?cleanStr(r[aid]):null;
+          c.annotator_id=nm||id||null;c._rosterAnnotator=nm||id||null;}
+        if(c.frame_range[0]===null&&rmin>=0)c.frame_range[0]=toInt(r[rmin]);
+        if(c.frame_range[1]===null&&rmax>=0)c.frame_range[1]=toInt(r[rmax]);
+      }
+    }
+  }
+
+  // 2) Annotation tabs (authoritative data; overrides roster metadata)
+  for(const tab of annTabs){
     const name=tab.trim();
     const raw=XLSX.utils.sheet_to_json(wb.Sheets[tab],{defval:null,header:1});
     if(!raw.length)continue;
@@ -264,18 +302,22 @@ function convert(wb){
       const row=raw[ri];const r={};for(const[k,i]of Object.entries(idx))r[k]=i>=0?row[i]:null;
       if(Object.values(r).every(isBlank))continue;
       if(isBlank(r.clip_id))continue;
-      const clip_id=normClipId(r.clip_id);
-      const origin=String(r.clip_id).trim();
-      if(clip_id!==null&&origin!==clip_id){const key=origin+"=>"+clip_id;if(!renamed.has(key)){renamed.add(key);
-        report.push({clip:clip_id,level:"info",msg:`normalized Clip_ID “${origin}” → “${clip_id}”`});}}
-      if(!clips.has(clip_id)){
-        clips.set(clip_id,{clip_id,ego4d_version:cleanStr(r.ego4d_version),video_uid:cleanStr(r.video_uid),
-          annotator_id:cleanStr(r.annotator_id),category:cleanStr(r.category),
-          frame_range:[toInt(r.frame_min),toInt(r.frame_max)],anchor_min_frame:toInt(r.anchor_min),
-          anchor_max_frame:toInt(r.anchor_max),keyframes:[],_tabs:new Set([name])});
-        clipSource.set(clip_id,name);
-      }else clips.get(clip_id)._tabs.add(name);
-      const clip=clips.get(clip_id);
+      const origin=String(r.clip_id).trim();const cid=normClipId(r.clip_id);if(!cid)continue;
+      if(origin!==cid){const key=origin+"=>"+cid;if(!renamed.has(key)){renamed.add(key);
+        ensure(cid)._issues.push({level:"info",msg:`normalized Clip_ID “${origin}” → “${cid}”`});}}
+      const clip=ensure(cid);
+      clip._annotated=true;clip._tabs.add(name);
+      if(!clipSource.has(cid))clipSource.set(cid,name);
+      // annotation tab metadata wins
+      const ev=cleanStr(r.ego4d_version);if(ev!==null)clip.ego4d_version=ev;
+      const vu=cleanStr(r.video_uid);if(vu!==null)clip.video_uid=vu;
+      const ai=cleanStr(r.annotator_id);if(ai!==null)clip.annotator_id=ai;
+      const ca=normCat(r.category);if(ca!==null)clip.category=ca;
+      const fmin=toInt(r.frame_min);if(fmin!==null)clip.frame_range[0]=fmin;
+      const fmax=toInt(r.frame_max);if(fmax!==null)clip.frame_range[1]=fmax;
+      const amin=toInt(r.anchor_min);if(amin!==null)clip.anchor_min_frame=amin;
+      const amax=toInt(r.anchor_max);if(amax!==null)clip.anchor_max_frame=amax;
+      // keyframe
       const frame_idx=toInt(r.frame_idx);if(frame_idx===null)continue;
       let s_low=toFloat(r.s_low),s_high=toFloat(r.s_high);const sfb=toFloat(r.s);
       if(s_low===null&&sfb!==null)s_low=sfb;if(s_high===null&&sfb!==null)s_high=sfb;
@@ -284,20 +326,24 @@ function convert(wb){
       clip.keyframes.push({frame_idx,form:normForm(r.form),s_low,s_high,visibility:normVis(r.visibility),bbox});
     }
   }
-  // dedup
+
+  // 3) dedup keyframes
   for(const[cid,c]of clips){
+    if(!c.keyframes.length)continue;
     const seen=new Set(),dd=[];let removed=0;
     for(const kf of c.keyframes){
       const b=kf.bbox?`${kf.bbox.x},${kf.bbox.y},${kf.bbox.w},${kf.bbox.h}`:"";
       const sig=`${kf.frame_idx}|${kf.form}|${kf.s_low}|${kf.s_high}|${kf.visibility}|${b}`;
       if(seen.has(sig)){removed++;continue;}seen.add(sig);dd.push(kf);}
-    if(removed)report.push({clip:cid,level:"dup",msg:`removed ${removed} duplicate keyframe(s) (${c.keyframes.length}→${dd.length})`});
+    if(removed)c._issues.push({level:"dup",msg:`removed ${removed} duplicate keyframe(s) (${c.keyframes.length}→${dd.length})`});
     c.keyframes=dd;
   }
-  // validate + completeness (JSON fields only)
+
+  // 4) validate + completeness (JSON fields only)
   for(const[cid,c]of clips){
-    c._issues=[];let nulls=0;
-    const push=(level,msg)=>c._issues.push({level,msg});
+    let nulls=0;const push=(level,msg)=>c._issues.push({level,msg});
+    c._source=clipSource.get(cid)||(c._rosterAnnotator?("Cliplist · "+c._rosterAnnotator):"Cliplist");
+    if(!c._annotated){push("err","not annotated yet — no keyframe data");c._nullCount=99;c._complete=false;continue;}
     if(c._tabs.size>1)push("err",`appears in multiple tabs: ${[...c._tabs].join(", ")} — one annotator per clip`);
     if(c.ego4d_version===null){nulls++;push("err","Ego4D_Version missing");}
     if(c.video_uid===null){nulls++;push("err","Video_UID missing");}
@@ -323,14 +369,14 @@ function convert(wb){
       if(lo!==null&&hi!==null&&!(lo<=kf.frame_idx&&kf.frame_idx<=hi))k.push("out of frame_range");
       if(k.length){nulls++;push("warn",`frame ${kf.frame_idx}: ${k.join(", ")}`);}
     });
-    c._nullCount=nulls;c._complete=nulls===0&&c.keyframes.length>0;c._source=clipSource.get(cid);
+    c._nullCount=nulls;c._complete=nulls===0&&c.keyframes.length>0;
   }
-  // attach clip-level info/dup/global issues that were pushed to report
-  for(const it of report){const c=clips.get(it.clip);if(c)c._issues.unshift({level:it.level,msg:it.msg});}
-  return {tabs,clips:[...clips.values()]};
+  // sort: numeric by clip number
+  const arr=[...clips.values()].sort((a,b)=>{
+    const na=parseFloat(a.clip_id.replace(/[^\d.]/g,""))||0,nb=parseFloat(b.clip_id.replace(/[^\d.]/g,""))||0;return na-nb;});
+  return {tabs:annTabs,clips:arr};
 }
 
-// strip internal fields for export
 function exportClip(c){
   return {clip_id:c.clip_id,ego4d_version:c.ego4d_version,video_uid:c.video_uid,annotator_id:c.annotator_id,
     category:c.category,frame_range:c.frame_range,anchor_min_frame:c.anchor_min_frame,anchor_max_frame:c.anchor_max_frame,
@@ -352,16 +398,49 @@ el.drop.addEventListener("drop",e=>{const f=e.dataTransfer.files[0];if(f)loadFil
 
 function loadFile(file){
   FILENAME=file.name;el.err.classList.remove("show");
+  el.drop.classList.add("loading");
+  const h2=el.drop.querySelector("h2");h2.textContent="Reading "+file.name+"…";
   const fr=new FileReader();
-  fr.onload=e=>{try{
-    WB=XLSX.read(new Uint8Array(e.target.result),{type:"array"});
-    DATA=convert(WB);
-    SEL=new Set(DATA.clips.filter(c=>c._complete).map(c=>c.clip_id)); // default: complete preselected
-    FILTER="all";QUERY="";el.search.value="";
-    document.querySelectorAll(".chip-btn[data-filter]").forEach(b=>b.classList.toggle("active",b.dataset.filter==="all"));
-    renderAll();
-    el.foot.textContent=FILENAME;
-  }catch(ex){showErr(ex.message||"Couldn’t read this file.");console.error(ex);}};
+  fr.onload=async e=>{
+    try{
+      const bytes=new Uint8Array(e.target.result);
+      // .xlsx is a zip. The bulk of large StateMeter files is embedded screenshot
+      // images (xl/media/*), which we never use. Strip them before SheetJS parses,
+      // so a 170MB workbook becomes a few MB and parses in well under a second.
+      h2.textContent="Stripping embedded images…";
+      await new Promise(r=>setTimeout(r,20));
+      const zin=await JSZip.loadAsync(bytes);
+      const zout=new JSZip();
+      const keep=[];
+      zin.forEach((path)=>{
+        const p=path.toLowerCase();
+        if(p.startsWith("xl/media/"))return;        // drop images
+        if(p.startsWith("xl/drawings/"))return;     // drop drawing anchors for them
+        if(p.includes("/media/"))return;
+        keep.push(path);
+      });
+      for(const path of keep){
+        const f=zin.file(path);if(!f)continue;
+        zout.file(path, await f.async("uint8array"));
+      }
+      h2.textContent="Parsing sheets…";
+      await new Promise(r=>setTimeout(r,20));
+      const slim=await zout.generateAsync({type:"uint8array"});
+      const want=[];
+      const probe=XLSX.read(slim,{type:"array",bookSheets:true});
+      probe.SheetNames.forEach(n=>{const k=n.trim().toLowerCase();
+        if(k.startsWith("annotation for")||k==="cliplist")want.push(n);});
+      WB=XLSX.read(slim,{type:"array",sheets:want,cellStyles:false,cellHTML:false,cellNF:false,sheetStubs:false});
+      DATA=convert(WB);
+      SEL=new Set(DATA.clips.filter(c=>c._complete).map(c=>c.clip_id));
+      FILTER="all";QUERY="";el.search.value="";
+      document.querySelectorAll(".chip-btn[data-filter]").forEach(b=>b.classList.toggle("active",b.dataset.filter==="all"));
+      renderAll();
+      el.foot.textContent=FILENAME;
+    }catch(ex){showErr(ex.message||"Couldn’t read this file.");console.error(ex);}
+    finally{el.drop.classList.remove("loading");h2.textContent="Drop the StateMeter workbook here";}
+  };
+  fr.onerror=()=>{showErr("Couldn’t read the file from disk.");el.drop.classList.remove("loading");h2.textContent="Drop the StateMeter workbook here";};
   fr.readAsArrayBuffer(file);
 }
 function showErr(m){el.err.innerHTML="<b>Couldn’t process the file.</b> "+m;el.err.classList.add("show");
@@ -372,13 +451,17 @@ function renderAll(){renderRibbon();renderClips();el.controls.classList.add("sho
   el.exportbar.classList.add("show");updateExport();}
 
 function renderRibbon(){
-  const c=DATA.clips,comp=c.filter(x=>x._complete).length,inc=c.length-comp;
+  const c=DATA.clips;
+  const comp=c.filter(x=>x._complete).length;
+  const notann=c.filter(x=>!x._annotated).length;
+  const inc=c.filter(x=>x._annotated&&!x._complete).length;
   const kf=c.reduce((a,x)=>a+x.keyframes.length,0);
   el.ribbon.innerHTML=`
-    <div class="rb"><div class="fname"><span class="dot"></span>${FILENAME}</div><div class="l" style="margin-top:8px">${DATA.tabs.length} annotation tabs merged</div></div>
-    <div class="rb"><div class="n">${c.length}</div><div class="l">Clips</div></div>
+    <div class="rb"><div class="fname"><span class="dot"></span>${esc(FILENAME)}</div><div class="l" style="margin-top:8px">${DATA.tabs.length} annotation tabs merged</div></div>
+    <div class="rb"><div class="n">${c.length}</div><div class="l">Clips total</div></div>
     <div class="rb good"><div class="n">${comp}</div><div class="l">Complete</div></div>
     <div class="rb ${inc?'warn':'good'}"><div class="n">${inc}</div><div class="l">Incomplete</div></div>
+    <div class="rb ${notann?'bad':'good'}"><div class="n">${notann}</div><div class="l">Not annotated</div></div>
     <div class="rb"><div class="n">${kf}</div><div class="l">Keyframes</div></div>`;
   el.ribbon.classList.add("show");
 }
@@ -412,7 +495,10 @@ function renderClips(){
 function cssEsc(s){return s.replace(/["\\]/g,"\\$&");}
 function clipRow(c){
   const sel=SEL.has(c.clip_id)?"sel":"";
-  const badge=c._complete?`<span class="badge ok">complete</span>`:`<span class="badge bad">${c._nullCount} issue${c._nullCount===1?"":"s"}</span>`;
+  let badge;
+  if(!c._annotated) badge=`<span class="badge none">not annotated</span>`;
+  else if(c._complete) badge=`<span class="badge ok">complete</span>`;
+  else badge=`<span class="badge bad">incomplete · ${c._nullCount} issue${c._nullCount===1?"":"s"}</span>`;
   const hasDetail=c._issues.length||c.keyframes.length;
   return `<div class="clip ${sel}" data-id="${c.clip_id}">
     <div class="clip-row">
@@ -474,6 +560,16 @@ el.exportBtn.addEventListener("click",async()=>{
   if(!DATA||SEL.size===0)return;
   try{
     const chosen=DATA.clips.filter(c=>SEL.has(c.clip_id));
+    // hard warning if any selected clip is incomplete or not annotated
+    const bad=chosen.filter(c=>!c._complete);
+    if(bad.length){
+      const names=bad.slice(0,8).map(c=>c.clip_id).join(", ")+(bad.length>8?` +${bad.length-8} more`:"");
+      const ok=window.confirm(
+        `⚠ ${bad.length} of ${chosen.length} selected clip(s) are INCOMPLETE and do not meet the client schema:\n\n`+
+        names+
+        `\n\nTheir JSON will contain null fields or empty keyframes. Export anyway?`);
+      if(!ok)return;
+    }
     if(chosen.length===1){
       const c=chosen[0];const blob=new Blob([JSON.stringify(exportClip(c),null,2)],{type:"application/json"});
       saveBlob(blob,c.clip_id+".json");return;
