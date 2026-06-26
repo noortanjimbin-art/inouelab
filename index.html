@@ -339,6 +339,17 @@ function convert(wb){
     c.keyframes=dd;
   }
 
+  // 3b) sort keyframes by s-value ascending (0 → 1); tie-break s_high then frame_idx.
+  // Keyframes with null s-values are placed last (not yet positioned on the 0→1 scale).
+  const sKey=v=>(v===null||v===undefined)?Infinity:v;
+  for(const[cid,c]of clips){
+    c.keyframes.sort((a,b)=>{
+      const al=sKey(a.s_low),bl=sKey(b.s_low);if(al!==bl)return al-bl;
+      const ah=sKey(a.s_high),bh=sKey(b.s_high);if(ah!==bh)return ah-bh;
+      return sKey(a.frame_idx)-sKey(b.frame_idx);
+    });
+  }
+
   // 4) validate + completeness (JSON fields only)
   for(const[cid,c]of clips){
     let nulls=0;const push=(level,msg)=>c._issues.push({level,msg});
@@ -377,8 +388,13 @@ function convert(wb){
   return {tabs:annTabs,clips:arr};
 }
 
+function clipIdNumber(id){
+  // internal id is "clip_N" or "clip_N.M" — emit the bare number in the JSON
+  const m=String(id).match(/(\d+(?:\.\d+)?)/);
+  return m?Number(m[1]):id;
+}
 function exportClip(c){
-  return {clip_id:c.clip_id,ego4d_version:c.ego4d_version,video_uid:c.video_uid,annotator_id:c.annotator_id,
+  return {clip_id:clipIdNumber(c.clip_id),ego4d_version:c.ego4d_version,video_uid:c.video_uid,annotator_id:c.annotator_id,
     category:c.category,frame_range:c.frame_range,anchor_min_frame:c.anchor_min_frame,anchor_max_frame:c.anchor_max_frame,
     keyframes:c.keyframes.map(k=>({frame_idx:k.frame_idx,form:k.form,s_low:k.s_low,s_high:k.s_high,visibility:k.visibility,bbox:k.bbox}))};
 }
