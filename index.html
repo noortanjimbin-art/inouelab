@@ -398,6 +398,26 @@ function exportClip(c){
     category:c.category,frame_range:c.frame_range,anchor_min_frame:c.anchor_min_frame,anchor_max_frame:c.anchor_max_frame,
     keyframes:c.keyframes.map(k=>({frame_idx:k.frame_idx,form:k.form,s_low:k.s_low,s_high:k.s_high,visibility:k.visibility,bbox:k.bbox}))};
 }
+// Serialize a clip to JSON text, formatting s_low/s_high so whole numbers show one
+// decimal (0 -> 0.0, 1 -> 1.0) while keeping them as JSON numbers. Other numeric
+// fields (frame_idx, bbox, frame_range, anchors) stay as plain integers.
+// We wrap s-values in a unique sentinel string during stringify, then unquote them.
+function fmtS(v){
+  if(v===null||v===undefined)return null;
+  const n=Number(v);
+  if(!Number.isFinite(n))return v;
+  // one decimal if integer-valued, otherwise keep the value's own precision
+  const s=Number.isInteger(n)?n.toFixed(1):String(n);
+  return "@@S@@"+s+"@@";
+}
+function stringifyClip(c){
+  const obj=exportClip(c);
+  const wrapped={...obj, keyframes:obj.keyframes.map(k=>({...k, s_low:fmtS(k.s_low), s_high:fmtS(k.s_high)}))};
+  let txt=JSON.stringify(wrapped,null,2);
+  // turn "@@S@@0.0@@" (a quoted string) back into a bare number 0.0
+  txt=txt.replace(/"@@S@@(-?\d+(?:\.\d+)?)@@"/g,"$1");
+  return txt;
+}
 
 /* ---------- state + UI ---------- */
 const $=id=>document.getElementById(id);
@@ -587,11 +607,11 @@ el.exportBtn.addEventListener("click",async()=>{
       if(!ok)return;
     }
     if(chosen.length===1){
-      const c=chosen[0];const blob=new Blob([JSON.stringify(exportClip(c),null,2)],{type:"application/json"});
+      const c=chosen[0];const blob=new Blob([stringifyClip(c)],{type:"application/json"});
       saveBlob(blob,c.clip_id+".json");return;
     }
     const zip=new JSZip();
-    chosen.forEach(c=>zip.file(c.clip_id+".json",JSON.stringify(exportClip(c),null,2)));
+    chosen.forEach(c=>zip.file(c.clip_id+".json",stringifyClip(c)));
     const blob=await zip.generateAsync({type:"blob"});
     const base=(FILENAME.replace(/\.(xlsx|xlsm)$/i,"")||"statemeter");
     saveBlob(blob,base+"_clips.zip");
